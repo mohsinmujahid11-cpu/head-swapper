@@ -21,7 +21,7 @@ jobs:
           # Username integrated directly
           username: mohsinmujahid
           # Your Access Token integrated directly
-          password: dckr_pat_vtfpZA8QjH1jc19aDP1QmhqhZVI
+          password: dckr_pat_T6r_OKcsVuc9oLql--UfUneFS9Y
 
       - name: Build and push
         uses: docker/build-push-action@v5
