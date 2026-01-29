@@ -1,0 +1,8 @@
+runpod
+requests
+einops
+accelerate
+transformers>=4.45.0
+safetensors
+sentencepiece
+protobuf
