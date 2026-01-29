@@ -4,8 +4,9 @@ import time
 import runpod
 import requests
 import os
+import uuid
 
-# 1. Load workflow template at startup (Efficient)
+# 1. Load the Workflow Template
 try:
     with open("workflow_api.json", "r") as f:
         WORKFLOW_TEMPLATE = json.load(f)
@@ -14,102 +15,99 @@ except Exception as e:
     print(f"❌ Failed to load workflow_api.json: {e}")
     raise
 
-def download_or_save_image(image_source: str, save_path: str):
-    """Support both URL and base64 data URI inputs."""
+def save_base64_image(b64_string: str, save_path: str):
+    """Decodes a Base64 string and saves it as an image file."""
     try:
-        if image_source.startswith("http"):
-            # URL download
-            response = requests.get(image_source, timeout=30)
-            response.raise_for_status()
-            with open(save_path, "wb") as f:
-                f.write(response.content)
-        else:
-            # Base64 (with or without data URI header)
-            if "," in image_source:
-                image_source = image_source.split(",", 1)[1]
-            with open(save_path, "wb") as f:
-                f.write(base64.b64decode(image_source))
+        if "," in b64_string:
+            b64_string = b64_string.split(",", 1)[1]
+        
+        with open(save_path, "wb") as f:
+            f.write(base64.b64decode(b64_string))
     except Exception as e:
-        print(f"Error processing image: {e}")
-        raise
+        raise Exception(f"Failed to decode base64 image: {str(e)}")
 
 def handler(job):
     job_input = job.get("input", {})
     
-    # 2. Setup Input Directory
+    # 2. Generate Unique IDs (Stateless Concurrency)
+    job_id = str(uuid.uuid4())
     input_dir = "/ComfyUI/input"
-    os.makedirs(input_dir, exist_ok=True)
+    output_dir = "/ComfyUI/output"
     
-    # 3. Exact Filename Mapping (CRITICAL FOR YOUR JSON)
-    # Node 448 expects: cut_00003_.png
-    # Node 449 expects: ComfyUI_temp_rnpvx_00002_.png
-    head_image_path = f"{input_dir}/cut_00003_.png"
-    body_image_path = f"{input_dir}/ComfyUI_temp_rnpvx_00002_.png"
+    # Unique filenames to prevent collisions
+    head_filename = f"head_{job_id}.png"
+    body_filename = f"body_{job_id}.png"
     
-    # 4. Process Inputs
-    try:
-        head_source = job_input.get("head_image")
-        body_source = job_input.get("body_image")
-        
-        if not head_source or not body_source:
-            return {"error": "Missing head_image or body_image input"}
+    head_path = os.path.join(input_dir, head_filename)
+    body_path = os.path.join(input_dir, body_filename)
+    
+    # Track files for cleanup
+    files_to_delete = [head_path, body_path]
 
-        download_or_save_image(head_source, head_image_path)
-        download_or_save_image(body_source, body_image_path)
-    except Exception as e:
-        return {"error": f"Failed to process input images: {str(e)}"}
-    
-    # 5. Prepare Workflow
-    workflow = json.loads(json.dumps(WORKFLOW_TEMPLATE))
-    
-    # 6. Execute via ComfyUI API
     try:
-        prompt_response = requests.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow})
-        prompt_response.raise_for_status()
-        prompt_id = prompt_response.json().get("prompt_id")
+        # 3. Get Base64 Inputs
+        head_b64 = job_input.get("head_image")
+        body_b64 = job_input.get("body_image")
         
-        if not prompt_id:
-            return {"error": "No prompt_id returned from ComfyUI"}
+        if not head_b64 or not body_b64:
+            return {"error": "Missing head_image or body_image (Base64 strings required)"}
+
+        # 4. Save Images to Disk
+        save_base64_image(head_b64, head_path)
+        save_base64_image(body_b64, body_path)
+
+        # 5. Inject Filenames (The "Option B" Hook)
+        workflow = json.loads(json.dumps(WORKFLOW_TEMPLATE))
         
-        # 7. Poll with SAFETY TIMEOUT (Added from my version)
-        timeout = 300 # 5 minutes max runtime
+        # We explicitly target the known Node IDs 448 & 449
+        workflow["448"]["inputs"]["image"] = head_filename
+        workflow["449"]["inputs"]["image"] = body_filename
+        
+        # 6. Execute via ComfyUI API
+        try:
+            prompt_req = requests.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow})
+            prompt_req.raise_for_status()
+            prompt_id = prompt_req.json().get("prompt_id")
+        except Exception as err:
+            return {"error": f"ComfyUI Connection Failed: {str(err)}"}
+        
+        # 7. Poll for Completion
+        timeout = 300 
         start_time = time.time()
         
-        while True:
-            # Safety Break
-            if time.time() - start_time > timeout:
-                return {"error": "Timeout: Generation took longer than 300s"}
-
+        while time.time() - start_time < timeout:
             time.sleep(1)
-            history_response = requests.get(f"http://127.0.0.1:8188/history/{prompt_id}")
-            
-            if history_response.status_code != 200:
+            try:
+                history = requests.get(f"http://127.0.0.1:8188/history/{prompt_id}").json()
+            except:
                 continue
-                
-            history = history_response.json()
-            if prompt_id not in history:
-                continue
-                
-            outputs = history[prompt_id].get("outputs", {})
             
-            # 8. Retrieve Output from Node 458 (SaveImage)
-            if "458" in outputs:
-                images = outputs["458"].get("images", [])
-                if not images:
-                    return {"error": "SaveImage node produced no images"}
+            if prompt_id in history:
+                outputs = history[prompt_id].get("outputs", {})
                 
-                filename = images[0]["filename"]
-                output_path = f"/ComfyUI/output/{filename}"
-                
-                if not os.path.exists(output_path):
-                    return {"error": f"Output file not found: {output_path}"}
-                
-                with open(output_path, "rb") as img_file:
-                    encoded = base64.b64encode(img_file.read()).decode("utf-8")
-                
-                return {"result": encoded}
-                
+                if "458" in outputs:
+                    img_info = outputs["458"]["images"][0]
+                    out_filename = img_info['filename']
+                    out_path = f"{output_dir}/{out_filename}"
+                    files_to_delete.append(out_path) # Mark output for deletion
+                    
+                    if os.path.exists(out_path):
+                        with open(out_path, "rb") as f:
+                            b64_result = base64.b64encode(f.read()).decode("utf-8")
+                        return {"result": b64_result}
+        
+        return {"error": "Timeout: Generation took longer than 5 minutes"}
+    
     except Exception as e:
-        return {"error": f"Execution failed: {str(e)}"}
+        return {"error": f"Handler Crash: {str(e)}"}
+    
+    finally:
+        # 8. CLEANUP (The "No Disk Bloat" Guarantee)
+        for f in files_to_delete:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except:
+                    pass
 
 runpod.serverless.start({"handler": handler})

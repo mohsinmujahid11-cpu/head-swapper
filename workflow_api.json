@@ -70,11 +70,11 @@
     "class_type": "KSampler"
   },
   "448": {
-    "inputs": { "image": "cut_00003_.png" },
+    "inputs": { "image": "INPUT_HEAD_PLACEHOLDER.png" },
     "class_type": "LoadImage"
   },
   "449": {
-    "inputs": { "image": "ComfyUI_temp_rnpvx_00002_.png" },
+    "inputs": { "image": "INPUT_BODY_PLACEHOLDER.png" },
     "class_type": "LoadImage"
   },
   "458": {
