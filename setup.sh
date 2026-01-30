@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Move to ComfyUI custom_nodes directory
+# SAFETY: Ensure custom_nodes directory exists
+mkdir -p /ComfyUI/custom_nodes
 cd /ComfyUI/custom_nodes
 
 echo "⬇️ Cloning Mandatory Custom Nodes (Slim Mode)..."
@@ -17,4 +18,9 @@ rm -rf ComfyUI-AuraFlow/.git
 git clone --depth 1 https://github.com/pamparamm/ComfyUI-Flux-Kontext-Image-Scale.git
 rm -rf ComfyUI-Flux-Kontext-Image-Scale/.git
 
-echo "✅ Setup Complete (Custom nodes only, no history bloat)"
+# CRITICAL FIX: Install dependencies for all cloned nodes
+# This ensures nodes like AuraFlow don't crash due to missing libraries.
+echo "📦 Installing Custom Node Dependencies..."
+find /ComfyUI/custom_nodes -name "requirements.txt" -exec pip install --no-cache-dir -r {} \;
+
+echo "✅ Setup Complete (Nodes + Dependencies Installed)"

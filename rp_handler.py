@@ -5,19 +5,24 @@ import runpod
 import requests
 import os
 import uuid
+import logging
 
-# 1. Load the Workflow Template
+# CONFIGURATION: Set up professional logging
+logging.basicConfig(level=logging.INFO)
+
+# 1. Load the Workflow Template (Global Scope for Speed)
 try:
     with open("workflow_api.json", "r") as f:
         WORKFLOW_TEMPLATE = json.load(f)
-    print("✅ Workflow template loaded successfully.")
+    logging.info("✅ Workflow template loaded successfully.")
 except Exception as e:
-    print(f"❌ Failed to load workflow_api.json: {e}")
+    logging.error(f"❌ Failed to load workflow_api.json: {e}")
     raise
 
 def save_base64_image(b64_string: str, save_path: str):
     """Decodes a Base64 string and saves it as an image file."""
     try:
+        # Strip metadata header if present (e.g., "data:image/png;base64,...")
         if "," in b64_string:
             b64_string = b64_string.split(",", 1)[1]
         
@@ -31,8 +36,14 @@ def handler(job):
     
     # 2. Generate Unique IDs (Stateless Concurrency)
     job_id = str(uuid.uuid4())
+    
+    # Define paths (Absolute paths are safer)
     input_dir = "/ComfyUI/input"
     output_dir = "/ComfyUI/output"
+    
+    # SAFETY FIX: Ensure directories exist before writing
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     
     # Unique filenames to prevent collisions
     head_filename = f"head_{job_id}.png"
@@ -63,32 +74,63 @@ def handler(job):
         workflow["448"]["inputs"]["image"] = head_filename
         workflow["449"]["inputs"]["image"] = body_filename
         
-        # 6. Execute via ComfyUI API
-        try:
-            prompt_req = requests.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow})
-            prompt_req.raise_for_status()
-            prompt_id = prompt_req.json().get("prompt_id")
-        except Exception as err:
-            return {"error": f"ComfyUI Connection Failed: {str(err)}"}
+        # 6. Execute via ComfyUI API (With Robust Retry Logic)
+        prompt_id = None
+        for attempt in range(3):
+            try:
+                # SAFETY FIX: Added timeout=10 to prevent hanging
+                prompt_req = requests.post(
+                    "http://127.0.0.1:8188/prompt", 
+                    json={"prompt": workflow}, 
+                    timeout=10
+                )
+                prompt_req.raise_for_status()
+                
+                prompt_id = prompt_req.json().get("prompt_id")
+                
+                # SAFETY FIX: Handle missing prompt_id
+                if not prompt_id:
+                    return {"error": "ComfyUI accepted request but returned no prompt_id"}
+                
+                # If successful, break the retry loop
+                break
+                
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as err:
+                # Log the retry attempt for debugging
+                logging.warning(f"⚠️ ComfyUI not ready yet (Attempt {attempt + 1}/3). Retrying in 2s...")
+                
+                if attempt == 2:
+                    return {"error": f"ComfyUI Connection/Timeout Failed (after 3 attempts): {str(err)}"}
+                
+                time.sleep(2) # Wait 2s before retrying
+                
+            except Exception as err:
+                return {"error": f"ComfyUI Connection Failed: {str(err)}"}
         
         # 7. Poll for Completion
         timeout = 300 
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            time.sleep(1)
+            time.sleep(1.5) # Slight optimization: Poll every 1.5s
+            
             try:
-                history = requests.get(f"http://127.0.0.1:8188/history/{prompt_id}").json()
+                # SAFETY FIX: Added timeout to history polling
+                history_req = requests.get(f"http://127.0.0.1:8188/history/{prompt_id}", timeout=5)
+                history = history_req.json()
             except:
                 continue
             
             if prompt_id in history:
                 outputs = history[prompt_id].get("outputs", {})
                 
+                # Check for our known Output Node ID (458)
                 if "458" in outputs:
                     img_info = outputs["458"]["images"][0]
                     out_filename = img_info['filename']
-                    out_path = f"{output_dir}/{out_filename}"
+                    
+                    # Safer path construction
+                    out_path = os.path.join(output_dir, out_filename)
                     files_to_delete.append(out_path) # Mark output for deletion
                     
                     if os.path.exists(out_path):
