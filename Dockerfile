@@ -15,18 +15,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /ComfyUI
 
 # Clone ComfyUI (shallow clone, remove .git)
-# Note: We clone into the current directory (.) because WORKDIR is already set
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git . \
     && rm -rf .git
 
 # COPY your custom requirements (Renamed to prevent overwriting ComfyUI's file)
 COPY requirements.txt requirements_custom.txt
 
-# Install dependencies (ComfyUI's first, then Yours)
-RUN pip install --upgrade pip --no-cache-dir && \
-    pip install --no-cache-dir \
-        -r requirements.txt \
-        -r requirements_custom.txt
+# ------------------------------------------------------------------------------
+# CRITICAL FIX: Sanitize ComfyUI requirements to prevent build crashes
+# 1. Remove 'torch' & 'torchvision' (Use the optimized ones in the base image)
+# 2. Remove 'opencv-python' (We use headless in requirements_custom.txt)
+# ------------------------------------------------------------------------------
+RUN sed -i '/torch/d' requirements.txt && \
+    sed -i '/opencv/d' requirements.txt && \
+    pip install --upgrade pip --no-cache-dir && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements_custom.txt
 
 # Install Custom Nodes
 COPY setup.sh .
